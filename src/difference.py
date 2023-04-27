@@ -1,115 +1,211 @@
-import pandas as pd
-from pathlib import Path
-from math import floor
-from torch import Tensor
-from numpy import newaxis
-from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, Dataset
-# Paths
-main_data_path = Path("../data")
-scv_folder = main_data_path / "csv_files"  # scv_folder
-img_path = main_data_path / "images"
+import numpy as np
+import csv
+from random import randint
+from os import listdir
+from PIL import ImageOps, Image
+from image_processing import *
+from check_validity_of_values import *
+from assistive_funcs import *
 
 
-class _CustomBigDataLoader:
-    def __init__(self, *, scv_folder, dataset_name, batch_size, train_size, is_train):
-        self.scv_folder = scv_folder
-        self.dataset_name = dataset_name
-        self.main_path = scv_folder / dataset_name
+def generate_csv(*, win_size, dump_to_file=1000, step=1,
+                 img_path=r"..\data\images",
+                 datasets_path=r"..\data\csv_files",
+                 noise_imgs_path=r"..\data\FC_imgs_with_noise",
+                 dataset_name=None,
+                 force_create_dataset=False,
+                 classification=False) -> None:
+    """
+    This function create dataset using certan
+    window and step on the images with borders.
+    """
+    check_valid_win_size(win_size)
+    need_to_add_name = check_dataset_name(dataset_name)
 
-        self.batch_size = batch_size
-        self.train_size = train_size
+    # Define constants
+    counter = 0
+    half_win_size = win_size // 2
+    win_square = win_size ** 2
+    total_errors = 0
 
-        self.test_batches, self.real_test_samples = self._get_test_amount()
-        self.skip_rows = self.real_test_samples
+    list_of_img_names = sorted(listdir(img_path))
+    # Array that contains rows with flatten cropped images
+    dumped_data = np.empty((dump_to_file, win_square + 1), dtype=float)
 
-        self.is_train = is_train
-        self.counter = 0
+    # Assistive function to show pased time
+    start_time = delta_time()
 
-        if self.is_train:
-            self.data = pd.read_csv(self.main_path, chunksize=self.batch_size,
-                                    header=None, index_col=None, iterator=True)
-        else:
-            self.data = pd.read_csv(self.main_path, chunksize=self.batch_size,
-                                    header=None, index_col=None, iterator=True,
-                                    skiprows=self.skip_rows)
+    # Load the images and convert to grayscale
+    imgs_list = load_images(img_path, list_of_img_names)
 
-    def _get_len_data(self) -> int:
-        idx_start = self.dataset_name.find("L") + 1
-        idx_finish = self.dataset_name.find(".")
-        length = int(self.dataset_name[idx_start:idx_finish])
-        return length
-
-    def _get_test_amount(self) -> tuple:
-        length = self._get_len_data()
-        test_smaples = int(length * self.train_size)
-        test_batches = floor(test_smaples / self.batch_size)
-        real_test_samples = test_batches * self.batch_size
-        return test_batches, real_test_samples
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if self.is_train:
-            if self.counter < self.test_batches:
-                self.counter += 1
-                raw_chunk = self.data.get_chunk()
-                x, y = self._prepare_chunk(raw_chunk)
-                return x, y
-            raise StopIteration
-        else:
-            raw_chunk = self.data.get_chunk()
-            x, y = self._prepare_chunk(raw_chunk)
-            return x, y
-
-    def _prepare_chunk(self, raw_chunk):
-        x = raw_chunk.drop(columns=raw_chunk.shape[1] - 1)
-        y = raw_chunk[raw_chunk.shape[1] - 1]
-
-        x = Tensor(x.to_numpy()).float()
-        y = Tensor(y.to_numpy()[:, newaxis]).float()
-        return x, y
-
-
-def get_train_test_big_data(*, scv_folder, dataset_name, batch_size, train_size):
-    train = _CustomBigDataLoader(scv_folder=scv_folder,
-                              dataset_name=dataset_name,
-                              batch_size=batch_size,
-                              train_size=train_size,
-                              is_train=True)
-    test = _CustomBigDataLoader(scv_folder=scv_folder,
-                             dataset_name=dataset_name,
-                             batch_size=batch_size,
-                             train_size=train_size,
-                             is_train=False)
-    return train, test
-
-
-class _CustomSmallDataLoader(Dataset):
-    def __init__(self, x, y) -> None:
-        super().__init__()
-        self.x = Tensor(x).float()
-        self.y = Tensor(y[:, newaxis]).float()
+    # Get shuffled indexes of imgs, rows, cols and the number of samples
+    m_shuffled_idxs, m_keys_list, total_length = get_shuffled_idxs(imgs_list=imgs_list, step=step)
     
-    def __getitem__(self, index):
-        return self.x[index], self.y[index]
+    if need_to_add_name:
+        dataset_name = f"W{win_size}_S{step}_L{total_length}.csv"
+    if not force_create_dataset:
+        check_existing_datasets(dataset_name, datasets_path)
+
+    # Adding borders for each image
+    src_images = [np.array(add_borders(img, half_win_size))
+                        for img in imgs_list]
     
-    def __len__(self):
-        return len(self.x)
+    parsed_imgs_list = [np.around(add_noise(img)) for img in src_images]
 
+    for name, noised_image in zip(list_of_img_names, parsed_imgs_list):
+        img = Image.fromarray(noised_image).convert("L")
+        img = img.crop((half_win_size, half_win_size,
+                        img.size[0] - half_win_size, img.size[1] - half_win_size))
+        img.save(f"{noise_imgs_path}\\{name}")
+        img = np.array(img)
 
-def get_train_test_small_data(*, scv_folder, dataset_name, batch_size, test_size=0.2, split=True):
-    main_path = scv_folder / dataset_name
-    data = pd.read_csv(main_path, header=None)
-    y = data[data.shape[1] - 1].to_numpy()
-    x = data.iloc[:, 0:data.shape[1]-1].to_numpy()
-    if split:
-        X_train, X_test, y_train, y_test = train_test_split(x, y, test_size=test_size, shuffle=True)
-        train_data = DataLoader(_CustomSmallDataLoader(X_train, y_train), batch_size=batch_size, shuffle=False)
-        test_data = DataLoader(_CustomSmallDataLoader(X_test, y_test), batch_size=batch_size, shuffle=False)
-        return train_data, test_data
+    del imgs_list
+
+    print('=' * 61, f"\nBorders were added, indexes were created. Passed time = {start_time():.2f}s")
+
+    if classification:
+        path_to_dataset = f"{datasets_path}\classification\{dataset_name}"
     else:
-        return DataLoader(_CustomSmallDataLoader(x, y), batch_size=batch_size, shuffle=True)
+        path_to_dataset = f"{datasets_path}\{dataset_name}"
+    with open(path_to_dataset, "w", newline='') as f:
+
+        # Set params to csv writter
+        csv.register_dialect('datasets_creator', delimiter=',', quoting=csv.QUOTE_NONE, skipinitialspace=False)
+        writer_obj = csv.writer(f, dialect="datasets_creator")
+
+        while m_shuffled_idxs:
+            counter += 1
+
+            """ This section choose random image, row and column """
+            """ The Devil will break his leg here """
+            ############################################################
+            # Random choose image, m_row(key) and val(m_column)
+            # Get an index if random image
+            m_chosen_img_idx = randint(0, len(m_shuffled_idxs) - 1)
+            # Get y indexes-m_column, the keys in a dict
+            m_chosen_keys = m_keys_list[m_chosen_img_idx]
+            # Get random key-m_row
+            m_row_idx = randint(0, len(m_chosen_keys) - 1)
+            m_row = m_keys_list[m_chosen_img_idx][m_row_idx]
+            # Get last value. Values have been just shuffled
+            m_column = m_shuffled_idxs[m_chosen_img_idx][m_row].pop()
+            ############################################################
+
+            # Choose image
+            main_img = parsed_imgs_list[m_chosen_img_idx]
+            target_img = src_images[m_chosen_img_idx]
+            # Get image 'window'
+            cropped_img = main_img[m_row:m_row+win_size, m_column:m_column+win_size]
+            cropped_src_img = target_img[m_row:m_row+win_size, m_column:m_column+win_size]
+
+            index_in_total_data = counter % dump_to_file
+            # Define target value and the noised data
+            try:
+                target = cropped_src_img[half_win_size, half_win_size]
+                data = cropped_img.flatten()
+
+                # Adding data for a special list in certan row
+                dumped_data[index_in_total_data][:win_square] = data
+                dumped_data[index_in_total_data][-1] = target
+            except (IndexError, ValueError) as ierr:
+                total_errors += 1
+                # print(ierr)
+                pass
+
+            # Dump to file
+            if index_in_total_data == 0:
+                writer_obj.writerows(dumped_data)
+                print(f"\rTime left = {start_time():.2f}s, {(counter / total_length) * 100:.2f}%", end="")
+
+            """ When no indexes in the line or no columns in image, removed keys, img"""
+            """ The Devil will break his leg here """
+            ############################################################
+            if len(m_shuffled_idxs[m_chosen_img_idx][m_row]) == 0:
+                m_shuffled_idxs[m_chosen_img_idx].pop(m_row)
+                m_keys_list[m_chosen_img_idx].pop(m_row_idx)
+                if len(m_shuffled_idxs[m_chosen_img_idx]) == 0:
+                    m_shuffled_idxs.pop(m_chosen_img_idx)
+                    m_keys_list.pop(m_chosen_img_idx)
+            ############################################################
+        # Dump to file rows, that weren't be added in the end
+        writer_obj.writerows(dumped_data[:index_in_total_data])
+
+    print(f"""\r=============================================================
+              \rDataset created.               
+              \rTotal spent time = {start_time():.2f}s
+              \rTotal samples = {total_length}
+              \rDataset name '{dataset_name}'
+              \rErrors: {total_errors}""")
+
+
+def generate_unshuffled_csv(*, win_size, dump_to_file=1000, step=1,
+                 img_path=r"..\data\images",
+                 datasets_path=r"..\data\csv_files",
+                 noise_imgs_path=r"..\data\FC_imgs_with_noise",
+                 dataset_name=None,
+                 force_create_dataset=False,
+                 ) -> None:
+    check_valid_win_size(win_size)
+    need_to_add_name = check_dataset_name(dataset_name)
+
+    # Define constants
+    counter = 0
+    total_samples = 0
+    half_win_size = win_size // 2
+    win_square = win_size ** 2
     
+    list_of_img_names = sorted(listdir(img_path))
     
+    imgs_list = load_images(img_path, list_of_img_names)
+    total_images = len(imgs_list)
+    
+    if need_to_add_name:
+        dataset_name = f"W{win_size}_S{step}.csv"
+    if not force_create_dataset:
+        check_existing_datasets(dataset_name, datasets_path)
+
+    path_to_dataset = f"{datasets_path}\{dataset_name}"
+        
+    dumped_data = np.empty((dump_to_file, win_square + 1), dtype=int)
+    with open(path_to_dataset, "w", newline='') as f:
+        # Set params to csv writter
+        csv.register_dialect('datasets_creator', delimiter=',', quoting=csv.QUOTE_NONE, skipinitialspace=False)
+        writer_obj = csv.writer(f, dialect="datasets_creator")
+        
+        for image_counter, (img, name) in enumerate(zip(imgs_list, list_of_img_names), start=1):
+            original_img_b = np.array(add_borders(img, half_win_size))
+            noised_img_b = np.around(add_noise(original_img_b))
+            
+            img = Image.fromarray(noised_img_b).convert("L")
+            img = img.crop((half_win_size, half_win_size, img.size[0] - half_win_size, img.size[1] - half_win_size))
+            img.save(f"{noise_imgs_path}\\{name}")
+            
+            height, width = noised_img_b.shape
+            
+            for y in range(0, height - win_size, step):
+                for x in range(0, width - win_size, step):
+                    data_slice = noised_img_b[y:y+win_size, x:x+win_size].flatten()
+                    target = original_img_b[y + half_win_size, x + half_win_size]
+                    dumped_data[counter][:win_square] = data_slice
+                    dumped_data[counter][-1] = target
+                    
+                    counter += 1
+                    if counter % dump_to_file == 0:
+                        total_samples += counter
+                        counter = 0
+                        print(f"\rimg: {image_counter}/{total_images}", end="")
+                        
+                        writer_obj.writerows(dumped_data)
+        writer_obj.writerows(dumped_data[:counter])
+        total_samples += counter
+        print(f"\nSamples: {total_samples}")
+
+
+if __name__ == "__main__":
+    generate_unshuffled_csv(win_size=7, dump_to_file=10, step=5,
+                 img_path=r"D:\Projects\PythonProjects\NIR\data\large_data\train_images",
+                 datasets_path=r"D:\Projects\PythonProjects\NIR\data\large_data\csv_files",
+                 noise_imgs_path=r"D:\Projects\PythonProjects\NIR\data\large_data\train_images_noised",
+                 dataset_name=None,
+                 force_create_dataset=1,
+                 classification=False)
