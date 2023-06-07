@@ -30,7 +30,7 @@ def main():
 
     e_words, r_words = get_data(parth_2_xlsx_file)
     data = parse_data(e_words, r_words)
-    write_data(data, parth_2_txt_file) 
+    write_data(data, parth_2_txt_file)
 
 
 if __name__ == "__main__":
